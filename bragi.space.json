@@ -1,0 +1,14 @@
+{
+  "$schema": "https://bragi.com/schemas/space-manifest.authored.schema.json",
+  "manifest_version": "1.0",
+  "space_kind": "single_space_v1_1",
+  "canonical_slug": "com.bragi.space.lumen",
+  "display_name": "Lumen",
+  "version": "0.1.0",
+  "theme": {
+    "primary": "#2DD4BF",
+    "mode": "dark"
+  },
+  "capability_requirements": [],
+  "attached_device_classes": []
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@bragi/space-lumen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "check": "bragi space check",
+    "check:json": "bragi space check --json",
+    "test": "vitest --exclude \"tests/**\"",
+    "test:run": "vitest run --passWithNoTests --exclude \"tests/**\"",
+    "test:publish-gate": "node ../../../../scripts/check-space-no-telemetry-network.mjs && playwright test --config playwright.config.ts"
+  },
+  "dependencies": {
+    "@bragi-gmbh/space-sdk": "workspace:*",
+    "@bragi/sdk": "workspace:*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@bragi/space-verifier": "workspace:*",
+    "@playwright/test": "^1.61.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5",
+    "vite": "^7.3.3",
+    "vitest": "^3.2.6"
+  }
+}

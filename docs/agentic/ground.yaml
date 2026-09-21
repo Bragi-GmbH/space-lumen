@@ -1,0 +1,16 @@
+canonical_slug: com.bragi.space.lumen
+name: Lumen
+team_slug: com.bragi.team.platform
+owners:
+  - com.bragi.person.claude-rebase
+depends_on:
+  - com.bragi.product.appkit
+  - com.bragi.product.sdk
+status_file: docs/agentic/status.yaml
+docs_root: docs/
+description: >
+  <DESCRIPTION>
+tags:
+  - space
+  - lumen
+links: {}
