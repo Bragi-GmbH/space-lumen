@@ -1,0 +1,8 @@
+{
+  "declarations": [
+    {
+      "name": "space_session_start",
+      "producer_type": "space"
+    }
+  ]
+}
