@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
-import { emitSpaceJsError, emitSpaceRenderFailed } from '@bragi/sdk';
+import { emitSpaceJsError, emitSpaceRenderFailed } from "@bragi-gmbh/space-sdk";
 
 /**
  * Root error boundary: catches render/commit errors below it and shows a
