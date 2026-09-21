@@ -1,0 +1,31 @@
+{
+  "packet_id": "space-ci",
+  "rollout_revision": 9,
+  "channel": "dev",
+  "files": [
+    {
+      "packet_path": "checks/build-space-bundle.mjs",
+      "repo_path": ".bragi/managed/space-ci/checks/build-space-bundle.mjs",
+      "mode": "100755",
+      "sha256": "d407d8171ead557b7f92fd2bdf5f298fc2ea5bf49815016f6daaf470aad30ee8"
+    },
+    {
+      "packet_path": "checks/integration-check.mjs",
+      "repo_path": ".bragi/managed/space-ci/checks/integration-check.mjs",
+      "mode": "100755",
+      "sha256": "9cda11e2cb049a59c602fc76134ac2d9bafd07251402bf68af8c05b78e1d919e"
+    },
+    {
+      "packet_path": "workflows/managed-space-build.yml",
+      "repo_path": ".github/workflows/space-ci-managed-space-build.yml",
+      "mode": "100644",
+      "sha256": "0e97ec2eed30be0c575ca1621fcf8ee2580ea09bc4f766ab880b3f9b8dcbb8f4"
+    },
+    {
+      "packet_path": "workflows/space-build.yml",
+      "repo_path": ".github/workflows/space-ci-space-build.yml",
+      "mode": "100644",
+      "sha256": "1ded6ad55434035c67e072c98a2a5dbc72ada052654d7f68297c47002f0d818a"
+    }
+  ]
+}
