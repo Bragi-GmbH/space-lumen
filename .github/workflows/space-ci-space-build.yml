@@ -1,0 +1,808 @@
+# managed-by: space-ci packet (packet-manifest.json records the exact
+# rollout_revision + per-file sha256 this file was provisioned at).
+#
+# THIS FILE IS PACKET-MANAGED. Do not hand-edit it in a provisioned Space
+# repo — an edit here is exactly the "managed_file_modified" drift case
+# (SP-21 D-18c): the release gate will refuse to sign/register on drift,
+# and the provisioner opens a remediation PR rather than overwriting it in
+# place. Content changes land through a new packet rollout_revision.
+#
+# What this workflow is (D-18a "dual-run builds"): the Space's OWN
+# build+test loop, running on every push, on the repo owner's OWN GitHub
+# Actions runners, at their own cost, with NO Bragi secret ever present
+# on the build-test job. It builds the Space, runs this packet's
+# integration check, and uploads an unsigned build artifact for CI
+# feedback. It never signs, registers, or mutates any release pointer —
+# the central, exact-SHA rebuild that DOES sign+register is a separate,
+# later slice (SP-21 slice 8, the central publisher), dispatched through
+# managed-space-build.yml (this same packet's other workflow), not this
+# one.
+#
+# rollout_revision 6 added the ONE thing this workflow is now allowed to
+# do beyond that (still short of publishing); rollout_revision 7 succeeds
+# 6 directly because 6's await-CI canary row became terminally `blocked`
+# when its designated canary repo was retired — canary state is one-way
+# per revision, so the designed remediation is a NEW revision, never a
+# reset (see platform/cloud/lib/space-provisioning/canary.ts). 7 carries
+# 6's candidate-submission BEHAVIOR unchanged, hardened in the same cut:
+# the one job that used to both run repository-controlled install/build
+# code AND hold `id-token: write` (GitHub Actions has no step-scoped
+# id-token permission — job level is the only granularity) is now split
+# into two jobs so no repository code ever executes in the same job — the
+# same runner VM — as the OIDC credential; see the comment block above
+# `rebuild-determinism` below for the exact split and its data flow.
+#
+# rollout_revision 8 changes exactly one thing: the bundle recipe (build +
+# deterministic tar.gz + digest) now lives in ONE packet-vendored script,
+# `checks/build-space-bundle.mjs` (provisioned at
+# `.bragi/managed/space-ci/checks/build-space-bundle.mjs`), which the
+# central publisher executes byte-identically from its own checkout of
+# this same packet revision directory. Root cause it exists for: candidate
+# b32831be (com.bragi.space.navigation @ d5cad9b16) was correctly refused
+# by the central D-18a gate because the two pipelines fed the build
+# DIFFERENT INPUT TREES — Tailwind CSS v4's automatic content detection
+# makes the emitted CSS (and, via the bundler's hash cascade, the JS
+# chunk) a function of every file next to the source, and the publisher's
+# old artifact round-trip silently dropped all dotfiles (actions/
+# upload-artifact v4 defaults `include-hidden-files: false`), while this
+# workflow builds in a full git checkout. The build-twice check below can
+# never catch that class (same workspace = same input tree), which is why
+# the recipe — including its build-input-tree normalization (`.npmrc`
+# removed before build, fresh build-out) — is now a single shared file on
+# both sides; see the script's own header for the full analysis and the
+# digest contract. The tar/gzip recipe itself is byte-continuous with
+# revision 7 (same flags, same `gzip -n`), so a digest attested by a
+# rev-7 repo and one attested by a rev-8 repo are directly comparable.
+#
+# The submission itself is unchanged from 6: on a real push to the
+# Space's own protected `main` — never `workflow_dispatch`, never any
+# other branch — this workflow mints a GitHub Actions OIDC token and
+# POSTs an UNSIGNED release candidate + provenance to
+# `POST /v2/spaces/{slug}/release-candidates` (OWNER-RATIFIED
+# 2026-08-24, "candidate-surface slice"). This is Slice 8's "central
+# publisher only" boundary made concrete: the route this workflow calls
+# structurally cannot register a release — it only ever writes a
+# `space_release_candidates` row — and authorization is derived
+# server-side from the Space's own verified SourceBinding (repository id
+# + full name + protected-main ref + this exact packet-rendered workflow
+# path), never from this workflow asserting anything about itself. OIDC
+# here admits candidate SUBMISSION, never release authority.
+#
+# Two things the submission pipeline must prove itself (both now proven by
+# the token-free `rebuild-determinism` job), because the central rebuild
+# (slice 8) will hold it to both:
+#   1. The build is REPRODUCIBLE — it builds the Space twice, from the
+#      same checkout, and compares the two resulting bundle digests
+#      before doing anything else. A non-reproducible build can never
+#      pass the central publisher's independent exact-SHA rebuild +
+#      digest comparison, so this job fails closed right here with an
+#      actionable message rather than letting a doomed candidate reach
+#      the cloud only to be silently unusable later.
+#   2. The submitted `packetContentDigest` is the exact
+#      `packet_releases.content_digest` value the cloud already holds for
+#      (packet_id, packetRevision) — computed the SAME way
+#      `scripts/managed-packets/publish.mjs`'s `computeContentDigest`
+#      does (sha256 of a canonical, key-sorted JSON form of this packet's
+#      own manifest), but reconstructed here from data this job can
+#      actually observe in the checkout: the packet's own provisioned
+#      identity file (`.bragi/space-ci.manifest.json`, D-18f layer 3)
+#      supplies `packet_id`/`rollout_revision`/`channel`/per-file sha256
+#      (its `packet_path` is `canonicalManifest`'s `path`, byte-for-byte);
+#      the four remaining manifest-level fields
+#      (`manifest_schema_version`/`min_compatible_revision`/
+#      `renderer_digest`/`extension_points`) are NOT observable from any
+#      committed repo file (embedding them — or the digest itself — in a
+#      file that is itself one of the packet's hashed files would be
+#      circular: this workflow's own bytes are one of those hashed
+#      files), so they are literal constants below, hand-kept in lockstep
+#      with `managed-packets/space-ci/9/packet-manifest.json` by the
+#      packet author — exactly the same "pasted in separately" discipline
+#      `render-space-ci-packet.mjs`'s own header already documents for
+#      this packet's per-file sha256 values.
+#
+# Deliberately SPACE-AGNOSTIC: this file is byte-identical (one recorded
+# sha256, packet-manifest.json) across EVERY Space repo using this packet
+# release — it never bakes in a specific Space's slug, package name, or
+# directory. It discovers "this Space" entirely from the checked-out
+# repo's own root files at run time: a root-level `package.json` with a
+# `build` script (D-19: a provisioned Space repo IS the Space — no
+# monorepo nesting) and `bragi.space.json`.
+#
+# rollout_revision 3: external Space repos vary in package manager — a
+# live CI run against a plain-npm repo (package-lock.json, no
+# `packageManager` field) proved rollout_revision 2's unconditional
+# `pnpm/action-setup` wrong ("Error: No pnpm version is specified.").
+# This workflow now DETECTS the package manager from whichever lockfile
+# is present at the repo root and adapts every install/build step to it.
+# SUPPORTED: npm and pnpm. yarn FAILS CLOSED at detection with an
+# actionable error: yarn's repository-controlled configuration surface
+# (.yarnrc.yml `plugins` / `yarnPath` execute arbitrary repo JS; yarn
+# Berry does not read the workflow-authored .npmrc for auth at all)
+# cannot be made token-safe with flags the way npm/pnpm can, so this
+# packet refuses rather than pretending — no Corepack, no yarn
+# executable, no token anywhere near repo-selected tooling. The pnpm version
+# is pinned by THIS PACKET, never by the repo: the `packageManager`
+# field selects which executable runs, and at install time that
+# executable handles NODE_AUTH_TOKEN — so CI strips the field from the
+# working copy and uses the workflow's own pinned version (the field
+# still applies for local development).
+#
+# `packages: read` + `NODE_AUTH_TOKEN` on the install step ONLY let this
+# install resolve the private `@bragi-gmbh/space-sdk` dependency from
+# GitHub Packages — without this, install fails 401 right after the
+# pnpm-detection fix, on every package manager equally. Registry auth is
+# a dependency-install concern, not a build one: the token is
+# deliberately absent from the Build Space step's env so a
+# repository-controlled build script (and any subprocess it spawns) has
+# nothing to exfiltrate.
+#
+# The registry/auth config itself is authored by THIS WORKFLOW, not read
+# from the checked-out repo. A provisioned Space repo also carries its
+# own committed `.npmrc` (written once at provisioning time by the
+# provisioner's `renderBragiRegistryNpmrc`,
+# platform/cloud/lib/space-provisioning/package-json-normalize.ts) — but
+# that file exists purely so a human can run `npm install` /
+# `pnpm install` / `yarn install` locally, off CI, without this
+# workflow's help; it is otherwise a normal file in the checked-out repo,
+# exactly as attacker-controlled as any other source file. If the
+# install step trusted it, a malicious or compromised commit could
+# repoint its `registry=` line (or add an unrelated host's `_authToken`
+# line) at an attacker-controlled registry and have this step's own
+# `NODE_AUTH_TOKEN` sent there instead — a package-manager CONFIG file,
+# not a lifecycle script, so `--ignore-scripts` does nothing to stop it.
+# Instead, the install step below OVERWRITES `.npmrc` with exactly the
+# two lines this install needs, echoed by the workflow itself right
+# before `NODE_AUTH_TOKEN` enters scope, host-bound to
+# `npm.pkg.github.com` — the repo's own copy of the file is never read.
+# pnpm and npm both read `.npmrc` natively for scoped-registry/auth
+# resolution — the same mechanism and file format
+# `renderBragiRegistryNpmrc` already relies on for local dev. One
+# authored file covers both supported managers.
+#
+# The install step itself also runs with `--ignore-scripts` (both supported
+# package managers) while NODE_AUTH_TOKEN is in scope: without it, a
+# repository-controlled dependency's own preinstall/install/postinstall
+# lifecycle script — not just the Space's build command — would execute
+# with the token present in its environment. pnpm additionally runs with
+# `--ignore-pnpmfile`: a repository-controlled .pnpmfile.cjs is loaded and
+# executed during install even under --ignore-scripts, so both flags
+# together mean no
+# repository-controlled code runs at all while the token is live, closing
+# that path the same way omitting the token from the Build Space step
+# closes the build-script path. A Space that genuinely needs a
+# dependency's lifecycle script (e.g. a native rebuild step) runs it
+# token-free, after install, from the Build Space step itself — e.g.
+# `npm rebuild` or re-invoking the specific package's postinstall script
+# there — which never has NODE_AUTH_TOKEN in its env.
+#
+# Rendered by @bragi/space-scaffold-engine v0.1.0.
+
+name: "Managed · Space CI · Build"
+run-name: "Managed · Space CI · Build · ${{ github.sha }} · @${{ github.actor }}"
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  SPACE_MANIFEST_PATH: "bragi.space.json"
+  BUILD_OUT: "dist"
+  INTEGRATION_CHECK_PATH: ".bragi/managed/space-ci/checks/integration-check.mjs"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # F52: checkout persists the job's GitHub token in .git/config by
+        # default, where repository-controlled build code could read it.
+        # This workflow never pushes, so no credential is needed at all.
+        with:
+          persist-credentials: false
+
+      - name: Detect package manager
+        id: pm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            MANAGER="pnpm"
+          elif [ -f package-lock.json ]; then
+            MANAGER="npm"
+          elif [ -f yarn.lock ]; then
+            echo "::error::yarn Spaces are not yet supported by the managed CI packet: yarn's repo-controlled configuration (.yarnrc.yml plugins / yarnPath, Berry's non-.npmrc auth) cannot be made token-safe. Use npm (package-lock.json) or pnpm (pnpm-lock.yaml), or remove the @bragi-gmbh dependency."
+            exit 1
+          else
+            echo "::error::no recognized lockfile (pnpm-lock.yaml, package-lock.json, or yarn.lock) at the repo root — cannot determine which package manager to use."
+            exit 1
+          fi
+          LOCKFILES=0
+          [ -f pnpm-lock.yaml ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f package-lock.json ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f yarn.lock ] && LOCKFILES=$((LOCKFILES+1))
+          if [ "$LOCKFILES" -gt 1 ]; then
+            echo "::error::multiple lockfiles present at the repo root — ambiguous package manager. Keep exactly one of pnpm-lock.yaml / package-lock.json."
+            exit 1
+          fi
+          echo "manager=$MANAGER" >> "$GITHUB_OUTPUT"
+          # The packet pins its own toolchain: the repo's package.json
+          # packageManager field selects which package-manager EXECUTABLE
+          # runs — with NODE_AUTH_TOKEN in scope at install time, that is
+          # repo-selected tooling handling the token. CI strips the field
+          # (working copy only, nothing is committed) and the workflow pins
+          # the version below; the repo's field still applies locally.
+          if [ -f package.json ]; then
+            node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));if('packageManager' in p){delete p.packageManager;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');console.log('stripped repo packageManager field for CI (packet pins the toolchain)');}"
+          fi
+          echo "detected package manager: $MANAGER"
+
+      # Version pinned by the PACKET, never by the repo: the packageManager
+      # field was stripped in the detect step, so the executable that runs
+      # with the token is always this workflow's choice.
+      - name: Setup pnpm (packet-pinned version)
+        if: steps.pm.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.15.9
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: ${{ steps.pm.outputs.manager }}
+
+
+      - name: Assert Space manifest is present
+        shell: bash
+        run: |
+          if [ ! -f "$SPACE_MANIFEST_PATH" ]; then
+            echo "::error file=$SPACE_MANIFEST_PATH::no bragi.space.json at the repo root — a provisioned Space repo must declare one (see docs/human/_shared/templates/space)."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This workflow is the sole author of the registry/auth config
+          # used for this install — the checked-out repo's own .npmrc
+          # (kept there only for local dev, see this file's header) is
+          # deliberately ignored and overwritten so a repo-controlled
+          # edit to it can never redirect where NODE_AUTH_TOKEN is sent.
+          # Host-bound to npm.pkg.github.com; pnpm and npm both
+          # read this same file for scoped-registry + auth-token
+          # resolution.
+          # shellcheck disable=SC2016 # intentional: this literal
+          # ${NODE_AUTH_TOKEN} is npm/pnpm/yarn .npmrc env-var
+          # substitution syntax, resolved by the package manager when it
+          # reads .npmrc, not by this bash script — it must NOT expand
+          # here.
+          printf '%s\n' \
+            '@bragi-gmbh:registry=https://npm.pkg.github.com/' \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > .npmrc
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile ;;
+            npm) npm ci --ignore-scripts ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      # NODE_AUTH_TOKEN is out of scope by the time this step runs (it is
+      # only set on "Install dependencies" above), and that step itself
+      # runs with --ignore-scripts, so no repository-controlled dependency
+      # lifecycle script (preinstall/install/postinstall) ever executes
+      # while the token is present. If this Space genuinely needs a
+      # dependency's lifecycle script (e.g. a native module rebuild), run
+      # it here, token-free — e.g. `npm rebuild` or invoking that
+      # package's own postinstall directly — never by dropping
+      # --ignore-scripts above.
+      - name: Build Space
+        shell: bash
+        run: |
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm build ;;
+            npm) npm run build ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      - name: Verify static export shape
+        shell: bash
+        run: |
+          if [ ! -f "$BUILD_OUT/index.html" ]; then
+            echo "::error file=$BUILD_OUT::Space build did not produce $BUILD_OUT/index.html — check the space's vite build config."
+            exit 1
+          fi
+
+      # rollout_revision 9: three build-test gates the packet previously left
+      # to each Space's own discretion. All three scripts (typecheck,
+      # test:run, test:publish-gate) are part of the standard scaffold
+      # (docs/human/_shared/templates/space/package.json) and confirmed
+      # present, with these exact names, in every fleet repo.
+      - name: Typecheck
+        shell: bash
+        run: |
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm typecheck ;;
+            npm) npm run typecheck ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm test:run ;;
+            npm) npm run test:run ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      # The "Install dependencies" step above runs --ignore-scripts (token
+      # safety, see its own comment), so Playwright's normal postinstall
+      # browser download never ran — install explicitly, token-free.
+      - name: Install Playwright browsers
+        shell: bash
+        run: npx playwright install --with-deps chromium
+
+      - name: Run publish-gate tests
+        shell: bash
+        run: |
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm test:publish-gate ;;
+            npm) npm run test:publish-gate ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      - name: Run packet integration check
+        shell: bash
+        run: |
+          if [ ! -f "$INTEGRATION_CHECK_PATH" ]; then
+            echo "::error file=$INTEGRATION_CHECK_PATH::space-ci packet integration check is missing at the expected provisioned path ($INTEGRATION_CHECK_PATH) — the packet may be incompletely provisioned; re-run the provisioning PR."
+            exit 1
+          fi
+          node "$INTEGRATION_CHECK_PATH" "$(pwd)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: space-build-${{ github.sha }}
+          if-no-files-found: error
+          path: ${{ env.BUILD_OUT }}
+
+  # rollout_revision 7: the candidate-submission pipeline, split in two
+  # (rev 6 ran it as ONE job that both executed repository-controlled
+  # install/build code and held `id-token: write` — GitHub Actions has no
+  # step-scoped id-token permission, so job level is the only isolation
+  # granularity that exists). The split:
+  #
+  #   rebuild-determinism (this job) — runs ALL the repository-controlled
+  #     code the submission needs (second install + build-twice
+  #     determinism check), with NO id-token permission: even fully
+  #     compromised repo code here cannot request an OIDC token
+  #     (ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN are simply never issued to
+  #     this job). It emits everything the submit job needs — bundle
+  #     digest, packet content digest, space slug — as JOB OUTPUTS, plus
+  #     the bragi.space.json manifest snapshot as a same-run artifact.
+  #
+  #   submit-release-candidate (below) — `id-token: write` and NOTHING
+  #     else; runs NO repository code at all (no checkout — its only
+  #     inputs are this job's outputs and the artifact), mints OIDC, and
+  #     POSTs the candidate exactly as rev 6 did.
+  #
+  # Why the job→job data path is not attacker-writable: the digests and
+  # slug travel as GitHub job outputs, produced only by this job's
+  # workflow-authored steps (the repo's own build steps have no `id:` and
+  # no output mapping — nothing they write to their own $GITHUB_OUTPUT is
+  # ever referenced). The manifest snapshot travels as an artifact
+  # uploaded by this job's workflow-authored upload step in the SAME run:
+  # actions/upload-artifact v4+ artifacts are IMMUTABLE per (run, name) —
+  # a second create with the same name is refused with a conflict error —
+  # so repo code that races to pre-create the name (from build-test or
+  # from this job's own build steps, via the runtime token) makes the
+  # workflow-authored upload FAIL, this job go red, and the submit job be
+  # skipped: fail closed, never a silently poisoned download. What repo
+  # code CAN still do — as it always could, split or no split — is lie
+  # about its own build output before the digest is taken; that is
+  # exactly why a candidate is UNSIGNED and untrusted by design, and why
+  # the central publisher (slice 8) independently rebuilds the exact SHA
+  # and compares digests before anything ships. The split's guarantee is
+  # credential isolation, not candidate integrity — the candidate was
+  # never trusted.
+  #
+  # Runs ONLY for a real push to this repo's own `main` — `if:` below is
+  # a courtesy that skips a doomed rebuild early; the actual security
+  # boundary is the server-side binding-derived exact match (D.0b), which
+  # fails closed on anything else (`ref_not_protected_main`,
+  # `repository_*_mismatch`, `workflow_ref_mismatch`) regardless of what
+  # this `if:` does.
+  rebuild-determinism:
+    name: "Rebuild + determinism check (token-free)"
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build-test.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Deliberately NO id-token here (the whole point of the rev-7 split);
+    # contents: read to check out, packages: read for the install step's
+    # registry token — same posture as build-test.
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      bundle_digest: ${{ steps.bundle2.outputs.digest }}
+      packet_content_digest: ${{ steps.packet.outputs.packet_content_digest }}
+      space_slug: ${{ steps.identity.outputs.space_slug }}
+      # The attempt number THIS job's artifact upload actually ran under.
+      # The submit job must derive the artifact name from this output —
+      # never from its own `github.run_attempt` — because on a "Re-run
+      # failed jobs" where only the submit job re-runs, `github.run_attempt`
+      # evaluates to the NEW attempt number there while this job's artifact
+      # (immutable, from the earlier attempt) keeps its old name;
+      # `needs.*.outputs` are preserved verbatim across such partial
+      # re-runs, so this value always names the artifact that really exists.
+      artifact_run_attempt: ${{ github.run_attempt }}
+    env:
+      SPACE_MANIFEST_PATH: "bragi.space.json"
+      PACKET_ID: "space-ci"
+      PACKET_ROLLOUT_REVISION: "9"
+      PACKET_IDENTITY_MANIFEST_PATH: ".bragi/space-ci.manifest.json"
+      BUNDLE_SCRIPT_PATH: ".bragi/managed/space-ci/checks/build-space-bundle.mjs"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect package manager
+        id: pm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            MANAGER="pnpm"
+          elif [ -f package-lock.json ]; then
+            MANAGER="npm"
+          elif [ -f yarn.lock ]; then
+            echo "::error::yarn Spaces are not yet supported by the managed CI packet: yarn's repo-controlled configuration (.yarnrc.yml plugins / yarnPath, Berry's non-.npmrc auth) cannot be made token-safe. Use npm (package-lock.json) or pnpm (pnpm-lock.yaml), or remove the @bragi-gmbh dependency."
+            exit 1
+          else
+            echo "::error::no recognized lockfile (pnpm-lock.yaml, package-lock.json, or yarn.lock) at the repo root — cannot determine which package manager to use."
+            exit 1
+          fi
+          LOCKFILES=0
+          [ -f pnpm-lock.yaml ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f package-lock.json ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f yarn.lock ] && LOCKFILES=$((LOCKFILES+1))
+          if [ "$LOCKFILES" -gt 1 ]; then
+            echo "::error::multiple lockfiles present at the repo root — ambiguous package manager. Keep exactly one of pnpm-lock.yaml / package-lock.json."
+            exit 1
+          fi
+          echo "manager=$MANAGER" >> "$GITHUB_OUTPUT"
+          if [ -f package.json ]; then
+            node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));if('packageManager' in p){delete p.packageManager;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');console.log('stripped repo packageManager field for CI (packet pins the toolchain)');}"
+          fi
+          echo "detected package manager: $MANAGER"
+
+      - name: Setup pnpm (packet-pinned version)
+        if: steps.pm.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.15.9
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: ${{ steps.pm.outputs.manager }}
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This install is the sole author of its own registry/auth config —
+          # see the build-test job's "Install dependencies" step for the full
+          # rationale (identical here: a checked-out repo's own .npmrc is
+          # never trusted for this).
+          # shellcheck disable=SC2016 # intentional: this literal
+          # ${NODE_AUTH_TOKEN} is npm/pnpm .npmrc env-var substitution syntax,
+          # resolved by the package manager when it reads .npmrc, not by this
+          # bash script — it must NOT expand here.
+          printf '%s\n' \
+            '@bragi-gmbh:registry=https://npm.pkg.github.com/' \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > .npmrc
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile ;;
+            npm) npm ci --ignore-scripts ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      # Determinism check #1/2 (this file's header, point 1): a candidate
+      # the submit job goes on to submit is only meaningful if the central
+      # publisher's own from-scratch rebuild of this exact commit can
+      # reproduce the same bundle bytes. Proving that here — in a job that
+      # cannot mint an OIDC token at all — means a non-reproducible Space
+      # build fails loudly on the repo owner's own runner instead of
+      # silently producing a candidate the central rebuild can never
+      # verify.
+      #
+      # rollout_revision 8: build + package are ONE call into this packet's
+      # own vendored bundle script (this file's header, "rollout_revision 8
+      # changes exactly one thing") — the exact file, sha256-recorded in
+      # packet-manifest.json and drift-gated by D-18c, that the central
+      # publisher also executes from its own checkout of this packet
+      # revision. The digest that becomes a job output is still computed by
+      # THIS workflow-authored step (sha256sum over the bundle file), never
+      # taken from any script's stdout — outputs stay workflow-authored.
+      - name: Build + package + digest (attempt 1 of 2)
+        id: bundle1
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BUNDLE_SCRIPT_PATH" ]; then
+            echo "::error file=$BUNDLE_SCRIPT_PATH::space-ci packet bundle script is missing at the expected provisioned path ($BUNDLE_SCRIPT_PATH) — the packet may be incompletely provisioned; re-run the provisioning PR."
+            exit 1
+          fi
+          node "$BUNDLE_SCRIPT_PATH" --out "$RUNNER_TEMP/bundle-1.tar.gz"
+          echo "digest=$(sha256sum "$RUNNER_TEMP/bundle-1.tar.gz" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build + package + digest (attempt 2 of 2), compare
+        id: bundle2
+        shell: bash
+        run: |
+          set -euo pipefail
+          node "$BUNDLE_SCRIPT_PATH" --out "$RUNNER_TEMP/bundle-2.tar.gz"
+          DIGEST_1="${{ steps.bundle1.outputs.digest }}"
+          DIGEST_2=$(sha256sum "$RUNNER_TEMP/bundle-2.tar.gz" | cut -d ' ' -f 1)
+          if [ "$DIGEST_1" != "$DIGEST_2" ]; then
+            echo "::error::Space build is not reproducible: two consecutive builds of the same commit ($GITHUB_SHA), from the same checkout and installed dependencies, produced different bundle digests ($DIGEST_1 vs $DIGEST_2). A non-reproducible build can never pass the central publisher's independent exact-SHA rebuild + digest comparison, so no release candidate is submitted for it. Check for embedded timestamps, random identifiers, or non-deterministic output ordering in the Space's build."
+            exit 1
+          fi
+          echo "digest=$DIGEST_2" >> "$GITHUB_OUTPUT"
+          echo "✓ build is reproducible — bundle digest $DIGEST_2"
+
+      - name: Resolve Space identity from the checked-out repo
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$SPACE_MANIFEST_PATH" ]; then
+            echo "::error file=$SPACE_MANIFEST_PATH::no bragi.space.json at the repo root."
+            exit 1
+          fi
+          SPACE_SLUG=$(node -e "process.stdout.write(String(JSON.parse(require('node:fs').readFileSync(process.env.SPACE_MANIFEST_PATH,'utf8')).canonical_slug ?? ''))")
+          # Same slug grammar as docs/agentic/schemas/space-manifest.schema.json's
+          # canonical_slug pattern — guarded before this value is ever emitted,
+          # same discipline as managed-space-build.yml's own identity step.
+          if [[ ! "$SPACE_SLUG" =~ ^com\.[a-z0-9][a-z0-9-]*\.space\.[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error file=$SPACE_MANIFEST_PATH::canonical_slug is missing or malformed: $(printf '%q' "$SPACE_SLUG")"
+            exit 1
+          fi
+          echo "space_slug=$SPACE_SLUG" >> "$GITHUB_OUTPUT"
+
+      # Determinism check #2/2 (this file's header, point 2): reconstruct
+      # `packet_releases.content_digest` for (space-ci, 9) from data this
+      # job can actually observe — the provisioned identity manifest plus
+      # this packet's own hand-kept manifest-level constants — using the
+      # exact canonical form scripts/managed-packets/publish.mjs's
+      # computeContentDigest defines (fixed key order, files sorted by
+      # path, hex digests lower-cased). See this file's header for why
+      # these four constants cannot themselves be observed from any
+      # committed file instead.
+      - name: Compute packet content digest
+        id: packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PACKET_IDENTITY_MANIFEST_PATH" ]; then
+            echo "::error file=$PACKET_IDENTITY_MANIFEST_PATH::packet identity manifest is missing at the expected provisioned path ($PACKET_IDENTITY_MANIFEST_PATH) — the packet may be incompletely provisioned; re-run the provisioning PR."
+            exit 1
+          fi
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+
+          const identity = JSON.parse(fs.readFileSync(process.env.PACKET_IDENTITY_MANIFEST_PATH, 'utf8'));
+          if (identity.packet_id !== process.env.PACKET_ID) {
+            console.error(`::error::provisioned identity manifest packet_id=${identity.packet_id} does not match this workflow's PACKET_ID=${process.env.PACKET_ID}`);
+            process.exit(1);
+          }
+          const expectedRevision = Number(process.env.PACKET_ROLLOUT_REVISION);
+          if (identity.rollout_revision !== expectedRevision) {
+            console.error(`::error::provisioned identity manifest rollout_revision=${identity.rollout_revision} does not match this workflow's PACKET_ROLLOUT_REVISION=${expectedRevision} — the repo is pinned to a different packet revision than the one that rendered this workflow file; re-run the provisioning/drift-remediation PR.`);
+            process.exit(1);
+          }
+
+          // Manifest-level fields fixed at rollout_revision 9 authoring time —
+          // hand-kept in lockstep with managed-packets/space-ci/9/packet-manifest.json
+          // (this file's header explains why they cannot be observed at CI
+          // runtime instead).
+          const MANIFEST_SCHEMA_VERSION = 1;
+          const MIN_COMPATIBLE_REVISION = 8;
+          const RENDERER_DIGEST = null;
+          const EXTENSION_POINTS = [
+            {
+              root: 'extensions/space-ci',
+              description: 'Reserved for Space-author custom scripts/hooks alongside this packet. Disjoint from every path this packet declares (workflows/, checks/) and never imported or executed by this packet\'s managed workflows (SP-21 D-18c).',
+            },
+          ];
+
+          const files = identity.files
+            .map((f) => ({ path: f.packet_path, mode: f.mode, sha256: String(f.sha256).toLowerCase() }))
+            .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+          const extensionPoints = EXTENSION_POINTS
+            .map((p) => ({ root: p.root.split(path.sep).join('/').replace(/\/+$/, ''), description: p.description ?? null }))
+            .sort((a, b) => (a.root < b.root ? -1 : a.root > b.root ? 1 : 0));
+
+          const canonical = {
+            packet_id: identity.packet_id,
+            rollout_revision: identity.rollout_revision,
+            manifest_schema_version: MANIFEST_SCHEMA_VERSION,
+            channel: identity.channel,
+            min_compatible_revision: MIN_COMPATIBLE_REVISION,
+            renderer_digest: RENDERER_DIGEST,
+            files,
+            extension_points: extensionPoints,
+          };
+          const digest = crypto.createHash('sha256').update(Buffer.from(JSON.stringify(canonical), 'utf8')).digest('hex');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `packet_content_digest=${digest}\n`);
+          NODE
+
+      # The submit job runs NO repository code and does NO checkout, so the
+      # manifest snapshot it must forward (`manifestSnapshot` in the submit
+      # body, unchanged since rev 6) travels as a same-run artifact instead
+      # of a second checkout. Uploaded by THIS workflow-authored step;
+      # actions/upload-artifact v4+ names are immutable within a run, so a
+      # pre-created squat on this name fails THIS step (409 conflict) and
+      # the pipeline goes red instead of the submit job downloading
+      # attacker-chosen bytes — see this job's own header comment for the
+      # full artifact-poisoning analysis. `github.run_attempt` is in the
+      # name only so a re-run attempt does not collide with attempt 1's
+      # immutable artifact. The two jobs do NOT independently evaluate that
+      # expression to agree on the name — they cannot: on a "Re-run failed
+      # jobs" where only the submit job re-runs, its `github.run_attempt`
+      # would evaluate to the new attempt number and name an artifact this
+      # job never uploaded (a guaranteed 404 until a full re-run). Instead,
+      # this job publishes the attempt it actually uploaded under as the
+      # `artifact_run_attempt` job output, and the submit job downloads by
+      # `needs.rebuild-determinism.outputs.artifact_run_attempt` — job
+      # outputs are preserved verbatim across partial re-runs, and run
+      # artifacts are shared across attempts of the same run, so the
+      # download always resolves the artifact that really exists.
+      - name: Upload manifest snapshot for the submit job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: release-candidate-inputs-${{ github.sha }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: ${{ env.SPACE_MANIFEST_PATH }}
+
+  # rollout_revision 7, second half of the split (see rebuild-determinism's
+  # header comment): the ONLY job in this workflow with `id-token: write`,
+  # and it runs NO repository code — no checkout, no install, no build; a
+  # `permissions:` block naming only `id-token` sets every other GITHUB_TOKEN
+  # scope to `none`. Its inputs are exclusively the rebuild job's outputs
+  # (digests + slug, written only by that job's workflow-authored steps) and
+  # the same-run manifest-snapshot artifact (same-run artifact download uses
+  # the runner's own runtime token, so no GITHUB_TOKEN scope is needed for
+  # it). The `if:` re-states the main-only push gate as a courtesy; as
+  # everywhere in this pipeline, the real boundary is the server-side
+  # binding-derived exact match, which fails closed regardless.
+  submit-release-candidate:
+    name: "Submit release candidate"
+    needs: rebuild-determinism
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rebuild-determinism.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+    env:
+      PACKET_ROLLOUT_REVISION: "9"
+    steps:
+      # The attempt segment of the name comes from the rebuild job's own
+      # output, NOT this job's `github.run_attempt`: on a partial re-run
+      # (only this job re-running), the two values differ and the local
+      # expression would name an artifact that was never uploaded — see the
+      # comment on the upload step in rebuild-determinism.
+      - name: Download manifest snapshot (uploaded by rebuild-determinism, this run)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-candidate-inputs-${{ github.sha }}-${{ needs.rebuild-determinism.outputs.artifact_run_attempt }}
+          path: ${{ runner.temp }}/candidate-inputs
+
+      - name: Mint OIDC token
+        id: oidc
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          # Same audience literal the monorepo's own space release workflow
+          # requests for POST /v2/spaces/[slug]/releases — GITHUB_OIDC_AUDIENCE
+          # is one shared, env-configured value on the cloud side, reused
+          # verbatim by the candidate-submission route (see that route's own
+          # header comment: "GITHUB_OIDC_AUDIENCE — reused from the releases
+          # route").
+          script: |
+            const token = await core.getIDToken('bragi-audio-app-release');
+            core.setSecret(token);
+            core.setOutput('token', token);
+
+      - name: Submit release candidate to @bragi/cloud
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          CLOUD_URL: ${{ vars.BRAGI_CLOUD_URL }}
+          SPACE_SLUG: ${{ needs.rebuild-determinism.outputs.space_slug }}
+          BUNDLE_DIGEST: ${{ needs.rebuild-determinism.outputs.bundle_digest }}
+          PACKET_CONTENT_DIGEST: ${{ needs.rebuild-determinism.outputs.packet_content_digest }}
+          SPACE_MANIFEST_PATH: ${{ runner.temp }}/candidate-inputs/bragi.space.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$CLOUD_URL" ]; then
+            echo "::error::BRAGI_CLOUD_URL is empty — set it on this repo's 'dev' GitHub Environment (same variable the Space's release workflow already relies on)."
+            exit 1
+          fi
+          # Same canonical-origin guard the release workflow applies to the
+          # identical admin-set BRAGI_CLOUD_URL value before ever using it in
+          # a curl request — defense in depth, not attacker input (this is a
+          # GitHub Environment variable, not anything derived from the push).
+          if ! [[ "$CLOUD_URL" =~ ^https://[A-Za-z0-9.-]+(:[1-9][0-9]{0,4})?/?$ ]]; then
+            echo "::error::BRAGI_CLOUD_URL must be a canonical https origin with an optional valid TCP port and no userinfo, path, query, or control chars."
+            exit 1
+          fi
+          CLOUD_URL="${CLOUD_URL%/}"
+          # Defense in depth on the cross-job inputs: the rebuild job's own
+          # workflow-authored steps already guarded these (slug grammar
+          # before it was ever emitted; digests are sha256sum/reconstruction
+          # output), but SPACE_SLUG is interpolated into the request path
+          # below, so re-assert the same grammar here — in the job that
+          # actually holds the token — plus the 64-hex shape of both
+          # digests. Pure bash, no repository code.
+          if [[ ! "$SPACE_SLUG" =~ ^com\.[a-z0-9][a-z0-9-]*\.space\.[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error::space_slug from the rebuild job is missing or malformed: $(printf '%q' "$SPACE_SLUG")"
+            exit 1
+          fi
+          if [[ ! "$BUNDLE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || [[ ! "$PACKET_CONTENT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::bundle/packet digest from the rebuild job is not a 64-hex sha256."
+            exit 1
+          fi
+          BODY=$(node -e "
+            const fs = require('node:fs');
+            const manifest = JSON.parse(fs.readFileSync(process.env.SPACE_MANIFEST_PATH, 'utf8'));
+            process.stdout.write(JSON.stringify({
+              commit: process.env.GITHUB_SHA,
+              packetRevision: Number(process.env.PACKET_ROLLOUT_REVISION),
+              packetContentDigest: process.env.PACKET_CONTENT_DIGEST,
+              bundleDigest: process.env.BUNDLE_DIGEST,
+              runId: process.env.GITHUB_RUN_ID,
+              actor: process.env.GITHUB_ACTOR,
+              manifestSnapshot: manifest,
+            }));
+          ")
+          ENDPOINT="${CLOUD_URL}/v2/spaces/${SPACE_SLUG}/release-candidates"
+          set +e
+          # --connect-timeout/--max-time: fail the step with a transport
+          # error instead of hanging until the job-level timeout if the
+          # cloud endpoint is unreachable or stalls mid-response.
+          HTTP_STATUS=$(curl -sS --connect-timeout 10 --max-time 300 \
+            -o "$RUNNER_TEMP/candidate-response.json" -w '%{http_code}' \
+            -X POST "$ENDPOINT" \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          CURL_EXIT=$?
+          set -e
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::error::Release-candidate submission transport failed for ${SPACE_SLUG}."
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/candidate-response.json"
+          if [[ "$HTTP_STATUS" =~ ^2[0-9]{2}$ ]]; then
+            echo "✓ release candidate submitted for ${SPACE_SLUG} @ ${GITHUB_SHA}"
+          else
+            echo "::error::Cloud rejected the release candidate for ${SPACE_SLUG} (HTTP $HTTP_STATUS)."
+            exit 1
+          fi

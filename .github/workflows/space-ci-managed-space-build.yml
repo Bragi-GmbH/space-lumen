@@ -1,0 +1,345 @@
+# managed-by: space-ci packet (packet-manifest.json records the exact
+# rollout_revision + per-file sha256 this file was provisioned at).
+#
+# THIS FILE IS PACKET-MANAGED — see space-build.yml's header for what that
+# means (SP-21 D-18c: hand-edits are "managed_file_modified" drift, never
+# silently overwritten, remediated by a bot PR).
+#
+# This is the DISPATCH-TARGET workflow: a repo-scoped Dispatcher App may
+# invoke it with an explicit full commit SHA. It builds and emits an
+# UNSIGNED quarantine artifact plus exact source provenance for the later
+# central publisher; it does not publish, sign, register, or mutate any
+# Space release pointer (that is the separate, later central rebuild +
+# release-gate, SP-21 slice 8 — this workflow only produces the candidate
+# the central rebuild independently reproduces and digest-compares against,
+# per D-18a).
+#
+# The checkout/exact-SHA-match semantics below are carried over UNCHANGED
+# from this repo's pre-existing monorepo-internal managed-space-build.yml.tmpl
+# (scripts/scaffold/managed-space-build.yml.tmpl, SP-21 slice 2) — same
+# input validation, same checkout pin, same "assert checked-out SHA
+# matches requested SHA" step. What differs is the BUILD section: this
+# packet variant is deliberately SPACE-AGNOSTIC (one recorded sha256,
+# packet-manifest.json, shipped byte-identically to every Space repo using
+# this packet — D-18c), so it resolves this Space's own slug/package name
+# from the checked-out repo's own root files (`bragi.space.json`,
+# `package.json`) at run time instead of from a value baked in when the
+# packet was authored, guarding each value with an anchored regex before
+# it is ever written to $GITHUB_OUTPUT/$GITHUB_ENV — the same discipline
+# scripts/validate-release-workflow-inputs.mjs enforces for every other
+# resolver in this repo (env: indirection, guard-before-emit, no raw
+# ${{ }} interpolation of untrusted content in a run: body).
+#
+# rollout_revision 3: same package-manager detection this packet's other
+# workflow (space-build.yml) gained — see that file's header for the full
+# rationale (a live CI run against a plain-npm external repo proved the
+# unconditional pnpm assumption wrong). This workflow discovers the
+# manager from the checked-out repo's own lockfile and adapts install/
+# build accordingly, and carries `packages: read` + `NODE_AUTH_TOKEN` on
+# the install step ONLY (not build) so it can resolve the private
+# `@bragi-gmbh/space-sdk` dependency from GitHub Packages. Registry auth
+# is an install-time concern; the token is deliberately absent from the
+# build step's env so a repository-controlled build script (and any
+# subprocess it spawns) has nothing to exfiltrate. SUPPORTED: npm and
+# pnpm; yarn FAILS CLOSED at detection (yarn's repo-controlled config
+# surface — .yarnrc.yml `plugins`/`yarnPath` executing arbitrary repo JS,
+# Berry ignoring `.npmrc` auth — cannot be made token-safe the way
+# npm/pnpm can, so this packet refuses rather than pretending; no
+# Corepack, no yarn executable, no token near repo-selected tooling).
+#
+# The registry/auth config used by the install step is authored by THIS
+# WORKFLOW, not read from the checked-out repo. A provisioned Space repo
+# also carries its own committed `.npmrc` (written once at provisioning
+# time by the provisioner's `renderBragiRegistryNpmrc`,
+# platform/cloud/lib/space-provisioning/package-json-normalize.ts) — kept
+# there purely so a human can run `npm install` / `pnpm install` /
+# `yarn install` locally, off CI. That file lives in the checked-out repo
+# and is exactly as attacker-controlled as any other source file: a
+# malicious or compromised commit at the requested `source_sha` could
+# repoint its `registry=` line (or add an unrelated host's `_authToken`
+# line) at an attacker-controlled registry and have this step's own
+# `NODE_AUTH_TOKEN` sent there instead — a package-manager CONFIG file,
+# not a lifecycle script, so `--ignore-scripts` does nothing to stop it.
+# Instead, the install step below OVERWRITES `.npmrc` with exactly the
+# two lines this install needs, echoed by the workflow itself right
+# before `NODE_AUTH_TOKEN` enters scope, host-bound to
+# `npm.pkg.github.com`. pnpm and npm both read `.npmrc` natively for
+# scoped-registry/auth resolution (the same mechanism and file format
+# `renderBragiRegistryNpmrc` relies on for local dev), so one authored
+# file covers both supported managers.
+#
+# The install step also runs with `--ignore-scripts` (both supported package
+# managers) while NODE_AUTH_TOKEN is in scope: without it, a
+# repository-controlled dependency's own preinstall/install/postinstall
+# lifecycle script — not just the Space's build command — would execute
+# with the token present in its environment. pnpm additionally runs with
+# `--ignore-pnpmfile`: a repository-controlled .pnpmfile.cjs is loaded and
+# executed during install even under --ignore-scripts, so both flags
+# together mean no
+# repository-controlled code runs at all while the token is live. A Space
+# that genuinely needs a dependency's lifecycle script runs it token-free,
+# after install, from the build step itself (e.g. `npm rebuild`),
+# which never has NODE_AUTH_TOKEN in its env.
+#
+# Rendered by @bragi/space-scaffold-engine v0.1.0.
+
+name: "Managed · Space Build"
+run-name: "Managed · Space Build · ${{ inputs.source_sha }} · @${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Exact source commit (full 40-character hexadecimal SHA)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  managed-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate exact source SHA
+        id: source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "::error::source_sha is required and must be a full 40-character hexadecimal SHA."
+            exit 1
+          fi
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::source_sha must be a full 40-character hexadecimal SHA."
+            exit 1
+          fi
+          NORMALIZED_SHA=$(printf '%s' "$SOURCE_SHA" | tr '[:upper:]' '[:lower:]')
+          echo "source_sha=$NORMALIZED_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact source SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert checkout matches requested SHA
+        id: checkout
+        env:
+          EXPECTED_SHA: ${{ steps.source.outputs.source_sha }}
+        shell: bash
+        run: |
+          CHECKED_OUT_SHA=$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')
+          if [ "$CHECKED_OUT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checkout mismatch: requested $EXPECTED_SHA, got $CHECKED_OUT_SHA."
+            exit 1
+          fi
+          echo "checked_out_sha=$CHECKED_OUT_SHA" >> "$GITHUB_OUTPUT"
+          echo "checked_out_sha=$CHECKED_OUT_SHA" >> "$GITHUB_ENV"
+
+      - name: Resolve Space identity from the checked-out repo
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f bragi.space.json ]; then
+            echo "::error file=bragi.space.json::no bragi.space.json at the repo root at the checked-out SHA."
+            exit 1
+          fi
+          if [ ! -f package.json ]; then
+            echo "::error file=package.json::no package.json at the repo root at the checked-out SHA."
+            exit 1
+          fi
+          SPACE_SLUG=$(node -e "process.stdout.write(String(JSON.parse(require('node:fs').readFileSync('bragi.space.json','utf8')).canonical_slug ?? ''))")
+          SPACE_PACKAGE=$(node -e "process.stdout.write(String(JSON.parse(require('node:fs').readFileSync('package.json','utf8')).name ?? ''))")
+          # Same slug grammar as docs/agentic/schemas/space-manifest.schema.json's
+          # canonical_slug pattern — guarded BEFORE this value is ever emitted, so
+          # a malformed/adversarial manifest can never carry it into a later step
+          # unvalidated.
+          if [[ ! "$SPACE_SLUG" =~ ^com\.[a-z0-9][a-z0-9-]*\.space\.[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error file=bragi.space.json::canonical_slug is missing or malformed: $(printf '%q' "$SPACE_SLUG")"
+            exit 1
+          fi
+          # Same grammar as the monorepo renderer's own package-name field
+          # (packages/space-scaffold-engine/src/managed-space-workflow.mjs).
+          if [[ ! "$SPACE_PACKAGE" =~ ^(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$ ]]; then
+            echo "::error file=package.json::package name is missing or malformed: $(printf '%q' "$SPACE_PACKAGE")"
+            exit 1
+          fi
+          echo "space_slug=$SPACE_SLUG" >> "$GITHUB_OUTPUT"
+          echo "space_package=$SPACE_PACKAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Detect package manager
+        id: pm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            MANAGER="pnpm"
+          elif [ -f package-lock.json ]; then
+            MANAGER="npm"
+          elif [ -f yarn.lock ]; then
+            echo "::error::yarn Spaces are not yet supported by the managed CI packet: yarn's repo-controlled configuration (.yarnrc.yml plugins / yarnPath, Berry's non-.npmrc auth) cannot be made token-safe. Use npm (package-lock.json) or pnpm (pnpm-lock.yaml), or remove the @bragi-gmbh dependency."
+            exit 1
+          else
+            echo "::error::no recognized lockfile (pnpm-lock.yaml, package-lock.json, or yarn.lock) at the repo root — cannot determine which package manager to use."
+            exit 1
+          fi
+          LOCKFILES=0
+          [ -f pnpm-lock.yaml ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f package-lock.json ] && LOCKFILES=$((LOCKFILES+1))
+          [ -f yarn.lock ] && LOCKFILES=$((LOCKFILES+1))
+          if [ "$LOCKFILES" -gt 1 ]; then
+            echo "::error::multiple lockfiles present at the repo root — ambiguous package manager. Keep exactly one of pnpm-lock.yaml / package-lock.json."
+            exit 1
+          fi
+          echo "manager=$MANAGER" >> "$GITHUB_OUTPUT"
+          # The packet pins its own toolchain: the repo's package.json
+          # packageManager field selects which package-manager EXECUTABLE
+          # runs — with NODE_AUTH_TOKEN in scope at install time, that is
+          # repo-selected tooling handling the token. CI strips the field
+          # (working copy only, nothing is committed) and the workflow pins
+          # the version below; the repo's field still applies locally.
+          if [ -f package.json ]; then
+            node -e "const fs=require('node:fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));if('packageManager' in p){delete p.packageManager;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');console.log('stripped repo packageManager field for CI (packet pins the toolchain)');}"
+          fi
+          echo "detected package manager: $MANAGER"
+
+      # Version pinned by the PACKET, never by the repo: the packageManager
+      # field was stripped in the detect step, so the executable that runs
+      # with the token is always this workflow's choice.
+      - name: Setup pnpm (packet-pinned version)
+        if: steps.pm.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 9.15.9
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: ${{ steps.pm.outputs.manager }}
+
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This workflow is the sole author of the registry/auth config
+          # used for this install — the checked-out repo's own .npmrc
+          # (kept there only for local dev, see this file's header) is
+          # deliberately ignored and overwritten so a repo-controlled
+          # edit to it can never redirect where NODE_AUTH_TOKEN is sent.
+          # Host-bound to npm.pkg.github.com; pnpm and npm both
+          # read this same file for scoped-registry + auth-token
+          # resolution.
+          # shellcheck disable=SC2016 # intentional: this literal
+          # ${NODE_AUTH_TOKEN} is npm/pnpm/yarn .npmrc env-var
+          # substitution syntax, resolved by the package manager when it
+          # reads .npmrc, not by this bash script — it must NOT expand
+          # here.
+          printf '%s\n' \
+            '@bragi-gmbh:registry=https://npm.pkg.github.com/' \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > .npmrc
+          case "${{ steps.pm.outputs.manager }}" in
+            pnpm) pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile ;;
+            npm) npm ci --ignore-scripts ;;
+            *) echo "::error::unexpected package manager '${{ steps.pm.outputs.manager }}'"; exit 1 ;;
+          esac
+
+      # NODE_AUTH_TOKEN is out of scope by the time this step runs (it is
+      # only set on "Install dependencies" above), and that step itself
+      # runs with --ignore-scripts, so no repository-controlled dependency
+      # lifecycle script (preinstall/install/postinstall) ever executes
+      # while the token is present. If this Space genuinely needs a
+      # dependency's lifecycle script (e.g. a native module rebuild), run
+      # it here, token-free — e.g. `npm rebuild` or invoking that
+      # package's own postinstall directly — never by dropping
+      # --ignore-scripts above.
+      # rollout_revision 8: build + static-export verification + the
+      # deterministic tar.gz all live in this packet's ONE vendored bundle
+      # script — the same file this packet's space-build.yml and the
+      # central publisher (bragi-ai-platform release-publisher-space.yml)
+      # execute, so this dispatch-target's bundle bytes can never drift
+      # from either (see the script's own header for the digest contract
+      # and the candidate-b32831be root cause it encodes).
+      - name: Build + package Space bundle (packet bundle script)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_SCRIPT_PATH=".bragi/managed/space-ci/checks/build-space-bundle.mjs"
+          if [ ! -f "$BUNDLE_SCRIPT_PATH" ]; then
+            echo "::error file=$BUNDLE_SCRIPT_PATH::space-ci packet bundle script is missing at the expected provisioned path ($BUNDLE_SCRIPT_PATH) — the packet may be incompletely provisioned; re-run the provisioning PR."
+            exit 1
+          fi
+          node "$BUNDLE_SCRIPT_PATH" --out "$RUNNER_TEMP/space-bundle.tar.gz"
+
+      - name: Create unsigned quarantine artifact and provenance
+        id: artifact
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          CHECKED_OUT_SHA: ${{ steps.checkout.outputs.checked_out_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+          SPACE_SLUG: ${{ steps.identity.outputs.space_slug }}
+          PROVENANCE_PATH: ${{ runner.temp }}/space-provenance.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_PATH="$RUNNER_TEMP/space-bundle.tar.gz"
+          PROVENANCE_PATH="$RUNNER_TEMP/space-provenance.json"
+          BUNDLE_SHA256=$(sha256sum "$BUNDLE_PATH" | cut -d ' ' -f 1)
+          BUNDLE_SIZE=$(wc -c < "$BUNDLE_PATH" | tr -d ' ')
+          export BUNDLE_SHA256 BUNDLE_SIZE PROVENANCE_PATH
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const manifest = JSON.parse(fs.readFileSync('bragi.space.json', 'utf8'));
+          const canonical = (value) => Array.isArray(value)
+            ? `[${value.map(canonical).join(',')}]`
+            : value !== null && typeof value === 'object'
+              ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+              : JSON.stringify(value);
+          const provenance = {
+            schema_version: 'managed-space-build-provenance-v1',
+            repository: process.env.REPOSITORY,
+            space_slug: process.env.SPACE_SLUG,
+            source_path: '.',
+            requested_sha: process.env.SOURCE_SHA,
+            checked_out_sha: process.env.CHECKED_OUT_SHA,
+            workflow_ref: process.env.WORKFLOW_REF,
+            run_id: process.env.RUN_ID,
+            run_attempt: process.env.RUN_ATTEMPT,
+            actor: process.env.ACTOR,
+            manifest_digest: crypto.createHash('sha256').update(canonical(manifest)).digest('hex'),
+            bundle_digest: process.env.BUNDLE_SHA256,
+            bundle_size_bytes: Number(process.env.BUNDLE_SIZE),
+            signed: false,
+            published: false,
+          };
+          fs.writeFileSync(process.env.PROVENANCE_PATH, `${JSON.stringify(provenance, null, 2)}\n`);
+          NODE
+          {
+            echo "bundle_path=$BUNDLE_PATH"
+            echo "provenance_path=$PROVENANCE_PATH"
+            echo "bundle_sha256=$BUNDLE_SHA256"
+            echo "bundle_size=$BUNDLE_SIZE"
+          } >> "$GITHUB_OUTPUT"
+          echo "✓ unsigned quarantine artifact prepared for ${REPOSITORY}@${CHECKED_OUT_SHA}"
+
+      - name: Upload quarantine artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: managed-space-${{ steps.source.outputs.source_sha }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.artifact.outputs.bundle_path }}
+            ${{ steps.artifact.outputs.provenance_path }}
