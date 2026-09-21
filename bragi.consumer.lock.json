@@ -1,7 +1,9 @@
 {
   "lock_version": "1",
   "packages": {
-    "@bragi/sdk": { "version": "0.2.0", "record_digest": "ac33bd391d95a1215f0c9387a0d42fba5c70d8207d402af149c687ead691aa64" },
-    "@bragi/space-verifier": { "version": "0.2.0", "record_digest": "93c786cec65f19a66b140a54c867c2c18a59f0664ff52c8e6dabc6e48b549cfc" }
+    "@bragi-gmbh/space-sdk": {
+      "version": "0.5.0",
+      "record_digest": "a232e1f9aa88036407253affc3d23991ab37fe511717cdc90d726c5e1af19f0d"
+    }
   }
 }
